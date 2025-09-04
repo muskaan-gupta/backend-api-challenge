@@ -74,21 +74,29 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
+// Graceful shutdown handlers
+const gracefulShutdown = (signal) => {
+  console.log(`${signal} received, shutting down gracefully`);
   server.close(() => {
-    console.log('Process terminated');
+    console.log('HTTP server closed');
     process.exit(0);
   });
-});
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('Could not close connections in time, forcefully shutting down');
+    process.exit(1);
+  }, 10000);
+};
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    console.log('Process terminated');
-    process.exit(0);
-  });
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle PM2 reload
+process.on('message', (msg) => {
+  if (msg === 'shutdown') {
+    gracefulShutdown('PM2 shutdown');
+  }
 });
 
 // Start server
@@ -99,6 +107,11 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`   GET http://localhost:${PORT}/`);
   console.log(`   GET http://localhost:${PORT}/sayHello`);
   console.log(`   GET http://localhost:${PORT}/health`);
+  
+  // Signal PM2 that the app is ready (for zero-downtime deployment)
+  if (process.send) {
+    process.send('ready');
+  }
 });
 
 module.exports = app;

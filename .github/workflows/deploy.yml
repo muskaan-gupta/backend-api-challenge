@@ -1,0 +1,97 @@
+name: Deploy Backend API
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run tests
+      run: |
+        # Start server in background for testing
+        npm start &
+        SERVER_PID=$!
+        sleep 5
+        
+        # Run tests
+        npm test
+        
+        # Gracefully stop server (no kill command)
+        if kill -0 $SERVER_PID 2>/dev/null; then
+          kill -TERM $SERVER_PID
+          wait $SERVER_PID 2>/dev/null || true
+        fi
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+        
+    - name: Add VM to known hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+        
+    - name: Create deployment package
+      run: |
+        mkdir -p deployment-package
+        cp package*.json deployment-package/
+        cp server.js deployment-package/
+        cp ecosystem.config.js deployment-package/
+        cp -r scripts deployment-package/
+        tar -czf backend-api-deployment.tar.gz -C deployment-package .
+        
+    - name: Upload files to VM
+      run: |
+        scp -o StrictHostKeyChecking=no backend-api-deployment.tar.gz ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/
+        scp -o StrictHostKeyChecking=no scripts/github-deploy.sh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/tmp/
+        
+    - name: Deploy to VM
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "chmod +x /tmp/github-deploy.sh && /tmp/github-deploy.sh"
+        
+    - name: Verify deployment
+      run: |
+        echo "Verifying deployment..."
+        sleep 10
+        response=$(ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "curl -f -s http://localhost/sayHello" || echo "FAILED")
+        
+        if [ "$response" = '{"message":"Hello User"}' ]; then
+          echo "✅ API is responding correctly!"
+          echo "🌐 API URL: http://${{ secrets.VM_HOST }}/sayHello"
+        else
+          echo "❌ API verification failed! Response: $response"
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "cd /opt/backend-api && bash scripts/rollback.sh" || true
+          exit 1
+        fi
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "rm -f /tmp/github-deploy.sh" || true
